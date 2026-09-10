@@ -1,0 +1,136 @@
+import os
+import pandas as pd
+import numpy as np
+import time
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
+from sklearn.metrics import (accuracy_score, f1_score, roc_auc_score,
+                             recall_score, confusion_matrix, precision_score, matthews_corrcoef)
+from sklearn.preprocessing import StandardScaler
+import warnings
+
+# Ignore joblib compatibility warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="joblib")
+
+if __name__ == '__main__':
+    print("Starting to read data...")
+    # Read data - columns from the second to the second-to-last are features, the last column is the label
+    data = pd.read_excel('Training_Set_Morgan_Fingerprints.xlsx')
+    print("Data reading completed")
+    print(f"Original data shape: {data.shape}")
+
+    # ================== Data preprocessing ==================
+    # Features are from the second column to the second-to-last column (indices 1 to -2)
+    features = data.iloc[:, 1:-1]
+    labels = data.iloc[:, -1]
+
+    print(f"\nFeature matrix shape: {features.shape}")
+    print(f"Label vector shape: {labels.shape}")
+
+    scaler = StandardScaler()
+    features_scaled = scaler.fit_transform(features)
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        features_scaled, labels, test_size=0.2, random_state=42
+    )
+    print(f"\nTraining set size: {X_train.shape}, Test set size: {X_test.shape}")
+
+    # ================== Model configuration ==================
+    model_params = {
+        'RF': {
+            'model': RandomForestClassifier(random_state=42),
+            'params': {'n_estimators': [50, 100, 200]}
+        },
+        'GBoost': {
+            'model': GradientBoostingClassifier(random_state=42),
+            'params': {'n_estimators': [50, 100, 200], 'learning_rate': [0.01, 0.1, 0.5]}
+        },
+        'LR': {
+            'model': LogisticRegression(max_iter=1000, random_state=42),
+            'params': {'C': [0.1, 1, 10]}
+        },
+        'SVM': {
+            'model': SVC(probability=True, random_state=42),
+            'params': {'C': [0.1, 1, 10], 'kernel': ['linear', 'rbf']}
+        }
+    }
+
+    results = {}
+    performance_data = []
+    confusion_matrices = []
+
+    # ================== Model training and evaluation ==================
+    total_training_time = 0
+
+    for model_name, mp in model_params.items():
+        print(f"\n=== Training model: {model_name} ===")
+        start_time = time.time()
+
+        grid_search = GridSearchCV(
+            mp['model'], mp['params'], cv=5,
+            n_jobs=-1, scoring='accuracy'
+        )
+        grid_search.fit(X_train, y_train)
+
+        end_time = time.time()
+        training_time = end_time - start_time
+        total_training_time += training_time
+
+        best_clf = grid_search.best_estimator_
+        y_pred = best_clf.predict(X_test)
+        y_proba = best_clf.predict_proba(X_test)[:, 1]
+
+        # Save key data
+        cm = confusion_matrix(y_test, y_pred)
+        results[model_name] = {
+            "best_params": grid_search.best_params_,
+            "model": best_clf,
+            "accuracy": accuracy_score(y_test, y_pred),
+            "f1_score": f1_score(y_test, y_pred, average='weighted'),
+            "auc": roc_auc_score(y_test, y_proba),
+            "sensitivity": recall_score(y_test, y_pred),
+            "specificity": cm[0, 0] / (cm[0, 0] + cm[0, 1]),
+            "precision": precision_score(y_test, y_pred),
+            "mcc": matthews_corrcoef(y_test, y_pred),
+            "y_proba": y_proba,
+            "y_test": y_test.values,
+            "training_time": training_time
+        }
+
+        print(f"{model_name} training completed, time taken: {training_time:.2f} seconds")
+        print(f"Best parameters: {grid_search.best_params_}")
+        print(f"Accuracy: {results[model_name]['accuracy']:.4f}")
+        print(f"AUC: {results[model_name]['auc']:.4f}")
+
+        # Save performance data
+        performance_data.append({
+            "Model": model_name,
+            "Acc.": results[model_name]['accuracy'],
+            "F1 score": results[model_name]['f1_score'],
+            "AUC": results[model_name]['auc'],
+            "Sen.": results[model_name]['sensitivity'],
+            "Spe.": results[model_name]['specificity'],
+            "Pre.": results[model_name]['precision'],
+            "MCC": results[model_name]['mcc'],
+            "Training Time": results[model_name]['training_time']
+        })
+
+        # Save confusion matrix
+        confusion_matrices.append({
+            "Model": model_name,
+            "True Positive": cm[1, 1],
+            "True Negative": cm[0, 0],
+            "False Positive": cm[0, 1],
+            "False Negative": cm[1, 0],
+        })
+
+    print(f"\nTotal training time: {total_training_time:.2f} seconds")
+
+    # ================== Save results ==================
+    performance_df = pd.DataFrame(performance_data)
+    performance_df = performance_df[
+        ['Model', 'Acc.', 'F1 score', 'AUC', 'Sen.', 'Spe.', 'Pre.', 'MCC', 'Training Time']]
+    performance_df.to_excel("Model_Performance_Metrics.xlsx", index=False)
+    print("\nModel performance metrics have been saved to 'Model_Performance_Metrics.xlsx'")
