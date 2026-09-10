@@ -1,0 +1,253 @@
+import warnings
+
+warnings.filterwarnings("ignore", category=UserWarning)
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+from rdkit import Chem
+from rdkit.Chem import rdFingerprintGenerator
+from rdkit.Chem.Scaffolds import MurckoScaffold
+from rdkit.DataStructs import BulkTanimotoSimilarity
+from rdkit.ML.Cluster import Butina
+
+# Global font settings: all-English Arial + bold all text and ticks
+plt.rcParams["font.sans-serif"] = ["Arial", "DejaVu Sans"]
+plt.rcParams["font.weight"] = "bold"
+plt.rcParams["axes.labelweight"] = "bold"
+plt.rcParams["axes.titleweight"] = "bold"
+plt.rcParams["axes.unicode_minus"] = False
+
+
+# 1. Extract the Bemis-Murcko scaffold
+def get_scaffold(smiles):
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return ""
+    try:
+        return Chem.MolToSmiles(
+            MurckoScaffold.GetScaffoldForMol(mol), canonical=True
+        )
+    except:
+        return ""
+
+
+# 2. Butina structural clustering function
+def perform_butina_clustering(fps, sim_threshold=0.6):
+    dist_cutoff = 1.0 - sim_threshold
+    nfps = len(fps)
+    dists = []
+
+    for i in range(1, nfps):
+        sims = BulkTanimotoSimilarity(fps[i], fps[:i])
+        dists.extend([1.0 - x for x in sims])
+
+    clusters = Butina.ClusterData(
+        dists, nfps, dist_cutoff, isDistData=True
+    )
+
+    cluster_labels = np.zeros(nfps, dtype=int)
+    for cluster_id, cluster in enumerate(clusters, start=1):
+        for idx in cluster:
+            cluster_labels[idx] = cluster_id
+
+    return cluster_labels
+
+
+# 3. Helper function for bold axis ticks
+def set_bold_ticks(ax):
+    ax.tick_params(axis="both", which="both", labelsize=12, width=2)
+    for label in ax.get_xticklabels() + ax.get_yticklabels():
+        label.set_fontweight("bold")
+
+
+if __name__ == "__main__":
+    input_excel = "Prediction_Results_Probability_Top100_with_SMILES.xlsx"
+    output_excel = "Top100_Grouped_by_Cluster_Probability.xlsx"
+
+    print("Starting to read data...")
+    df = pd.read_excel(input_excel)
+
+    if "SMILES" not in df.columns or "Compound" not in df.columns:
+        raise ValueError("The input file must contain 'Compound' and 'SMILES' columns!")
+
+    # 1. Take the top 100 compounds by Average probability
+    top100_df = (
+        df.sort_values(by="Average", ascending=False)
+        .head(100)
+        .reset_index(drop=True)
+    )
+
+    # 2. Compute fingerprints, extract scaffolds, and perform Butina clustering
+    print("Computing Morgan fingerprints, extracting scaffolds, and performing structural clustering...")
+    fp_gen = rdFingerprintGenerator.GetMorganGenerator(
+        radius=2, fpSize=1024
+    )
+    mols = [Chem.MolFromSmiles(s) for s in top100_df["SMILES"]]
+    fps = [fp_gen.GetFingerprint(m) for m in mols]
+
+    top100_df["Cluster_ID"] = perform_butina_clustering(
+        fps, sim_threshold=0.6
+    )
+    top100_df["Murcko_Scaffold"] = top100_df["SMILES"].apply(get_scaffold)
+
+    # 3. Sort by the highest probability in each cluster and renumber the clusters
+    # (so that Cluster 1 is the scaffold cluster with the highest overall probability)
+    cluster_max = (
+        top100_df.groupby("Cluster_ID")["Average"]
+        .max()
+        .sort_values(ascending=False)
+    )
+    cluster_rank_map = {
+        old_id: f"Cluster {new_id}"
+        for new_id, old_id in enumerate(cluster_max.index, start=1)
+    }
+    top100_df["Cluster_Name"] = top100_df["Cluster_ID"].map(
+        cluster_rank_map
+    )
+
+    # 4. Keep molecules in the same cluster together, and sort within each cluster by Average descending
+    top100_df = top100_df.sort_values(
+        by=["Cluster_Name", "Average"], ascending=[True, False]
+    ).reset_index(drop=True)
+
+    # ================== 5. Export to Excel ==================
+    cols_order = [
+        "Cluster_Name",
+        "Compound",
+        "SMILES",
+        "Average",
+        "RF",
+        "GBoost",
+        "LR",
+        "SVM",
+        "Murcko_Scaffold",
+    ]
+    existing_cols = [c for c in cols_order if c in top100_df.columns]
+    export_df = top100_df[existing_cols]
+
+    export_df.to_excel(output_excel, index=False, engine="openpyxl")
+    print(f"\n[Success] The Excel file grouped by cluster has been saved to: {output_excel}")
+
+    # ================== 6. Visualization section ==================
+    cluster_names = sorted(
+        top100_df["Cluster_Name"].unique(), key=lambda x: int(x.split()[1])
+    )
+
+    # Figure 1: Cluster-probability distribution plot (Strip + Box Plot)
+    print("Generating Figure 1: Probability distribution of compounds in the same cluster...")
+    fig1, ax1 = plt.subplots(figsize=(12, 7))
+
+    sns.boxplot(
+        data=top100_df,
+        x="Cluster_Name",
+        y="Average",
+        order=cluster_names,
+        ax=ax1,
+        color="#e0f2fe",
+        boxprops=dict(alpha=0.6, edgecolor="navy", linewidth=1.5),
+        whiskerprops=dict(color="navy", linewidth=1.5),
+        capprops=dict(color="navy", linewidth=1.5),
+        medianprops=dict(color="red", linewidth=2),
+    )
+
+    sns.stripplot(
+        data=top100_df,
+        x="Cluster_Name",
+        y="Average",
+        order=cluster_names,
+        ax=ax1,
+        size=8,
+        jitter=0.2,
+        palette="tab10",
+        hue="Cluster_Name",
+        legend=False,
+        linewidth=1,
+        edgecolor="black",
+    )
+
+    ax1.set_xlabel("Structural Clusters", fontsize=14, fontweight="bold")
+    ax1.set_ylabel(
+        "Average Predicted Probability", fontsize=14, fontweight="bold"
+    )
+    ax1.set_title(
+        "Probability Distribution Grouped by Structural Cluster (Top 100)",
+        fontsize=15,
+        fontweight="bold",
+        pad=15,
+    )
+    ax1.axhline(0.5, color="gray", linestyle="--", linewidth=1.5, alpha=0.7)
+    ax1.grid(True, linestyle="--", alpha=0.4)
+    set_bold_ticks(ax1)
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+
+    # Figure 2: Heatmap of model predictions ordered by cluster
+    print("Generating Figure 2: Heatmap of model predictions arranged hierarchically by cluster...")
+    models = ["RF", "GBoost", "LR", "SVM", "Average"]
+    heatmap_data = top100_df[models].copy()
+
+    fig2, (ax_side, ax_heat) = plt.subplots(
+        1,
+        2,
+        figsize=(11, 10),
+        gridspec_kw={"width_ratios": [0.3, 10], "wspace": 0.03},
+    )
+
+    unique_clusters = top100_df["Cluster_Name"].unique()
+    cluster_color_map = {
+        name: plt.cm.tab20(i % 20) for i, name in enumerate(unique_clusters)
+    }
+    cluster_colors = np.array(
+        [cluster_color_map[c] for c in top100_df["Cluster_Name"]]
+    ).reshape(-1, 1, 4)
+
+    ax_side.imshow(cluster_colors, aspect="auto")
+    ax_side.set_xticks([])
+    ax_side.set_yticks([])
+    ax_side.set_ylabel(
+        "Top 100 Compounds (Grouped by Cluster)",
+        fontsize=13,
+        fontweight="bold",
+    )
+
+    sns.heatmap(
+        heatmap_data,
+        ax=ax_heat,
+        cmap="YlGnBu",
+        cbar_kws={"label": "Predicted Probability", "pad": 0.02},
+        yticklabels=False,
+        vmin=0.0,
+        vmax=1.0,
+    )
+
+    # Draw horizontal cluster separation lines
+    cluster_change_indices = (
+        np.where(
+            top100_df["Cluster_Name"].values[:-1]
+            != top100_df["Cluster_Name"].values[1:]
+        )[0]
+        + 1
+    )
+    for idx in cluster_change_indices:
+        ax_heat.axhline(idx, color="black", linewidth=1.5)
+
+    ax_heat.set_title(
+        "Model Probabilities Heatmap (Compounds Ordered by Cluster)",
+        fontsize=15,
+        fontweight="bold",
+        pad=15,
+    )
+    ax_heat.set_xticklabels(models, fontsize=12, fontweight="bold")
+    set_bold_ticks(ax_heat)
+
+    cbar = ax_heat.collections[0].colorbar
+    cbar.ax.yaxis.label.set_fontweight("bold")
+    for label in cbar.ax.get_yticklabels():
+        label.set_fontweight("bold")
+
+    plt.tight_layout()
+
+    print("\nOpening the Matplotlib visualization window...")
+    plt.show()
