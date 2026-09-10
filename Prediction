@@ -1,0 +1,112 @@
+import warnings
+
+# Ignore irrelevant warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+
+import joblib
+import numpy as np
+import pandas as pd
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+from sklearn.feature_selection import VarianceThreshold
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import GridSearchCV, train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
+
+if __name__ == "__main__":
+    # ================== 1. Training section ==================
+    print("Starting to read training data...")
+    train_data = pd.read_excel("Training_Set_Morgan_Fingerprints.xlsx")
+    print(f"Training data reading completed, shape: {train_data.shape}")
+
+    # Extract features and labels
+    if "Label" in train_data.columns:
+        labels = train_data["Label"]
+        fp_columns = [c for c in train_data.columns if c.startswith("Bit_")]
+    else:
+        fp_columns = train_data.columns[1:-1]
+        labels = train_data.iloc[:, -1]
+
+    features = train_data[fp_columns]
+
+    # Feature preprocessing: remove constant feature bits and standardize
+    selector = VarianceThreshold(threshold=0.0)
+    features_filtered = selector.fit_transform(features)
+
+    scaler = StandardScaler()
+    features_scaled = scaler.fit_transform(features_filtered)
+
+    # Split into training and test sets
+    X_train, X_test, y_train, y_test = train_test_split(
+        features_scaled, labels, test_size=0.2, random_state=42, stratify=labels
+    )
+
+    # Model and parameter configuration
+    model_params = {
+        "RF": {
+            "model": RandomForestClassifier(random_state=42),
+            "params": {"n_estimators": [50, 100, 200]},
+        },
+        "GBoost": {
+            "model": GradientBoostingClassifier(random_state=42),
+            "params": {
+                "n_estimators": [50, 100, 200],
+                "learning_rate": [0.01, 0.1, 0.5],
+            },
+        },
+        "LR": {
+            "model": LogisticRegression(max_iter=1000, random_state=42),
+            "params": {"C": [0.1, 1, 10]},
+        },
+        "SVM": {
+            "model": SVC(probability=True, random_state=42),
+            "params": {"C": [0.1, 1, 10], "kernel": ["linear", "rbf"]},
+        },
+    }
+
+    trained_models = {}
+
+    for model_name, mp in model_params.items():
+        print(f"\n=== Training model: {model_name} ===")
+        grid_search = GridSearchCV(
+            mp["model"], mp["params"], cv=5, n_jobs=-1, scoring="accuracy"
+        )
+        grid_search.fit(X_train, y_train)
+
+        best_model = grid_search.best_estimator_
+        trained_models[model_name] = best_model
+
+        y_proba = best_model.predict_proba(X_test)[:, 1]
+        auc = roc_auc_score(y_test, y_proba)
+        print(f"Best parameters: {grid_search.best_params_} | Test set AUC: {auc:.4f}")
+
+    print("\nAll models have been trained!")
+
+    # ================== 2. Prediction section ==================
+    print("\nStarting to read prediction data...")
+    predict_data = pd.read_excel("Prediction_Set_Morgan_Fingerprints.xlsx")
+    print(f"Prediction data reading completed, shape: {predict_data.shape}")
+
+    compounds = predict_data.iloc[:, 0]
+    predict_fp = predict_data[fp_columns]
+
+    # Data transformation
+    predict_fp_filtered = selector.transform(predict_fp)
+    predict_fp_scaled = scaler.transform(predict_fp_filtered)
+
+    results = {}
+    print("\nStarting prediction...")
+    for model_name, model in trained_models.items():
+        print(f"Predicting using model {model_name}...")
+        results[model_name] = model.predict_proba(predict_fp_scaled)[:, 1]
+
+    # Save prediction results to DataFrame
+    results_df = pd.DataFrame({"Compound": compounds})
+    models = ["RF", "GBoost", "LR", "SVM"]
+    for model_name in models:
+        results_df[model_name] = results[model_name]
+
+    results_df["Average"] = results_df[models].mean(axis=1)
+    results_df.to_excel("Prediction_Results_Probability.xlsx", index=False)
+    print("\nPrediction results have been saved to 'Prediction_Results_Probability.xlsx'")
